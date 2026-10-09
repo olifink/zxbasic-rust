@@ -5,7 +5,8 @@
 //! errors are reported as `C Nonsense in BASIC` before the line is stored.
 
 use crate::ast::{
-    ArrayName, BinOp, DataItem, Expr, InputItem, LValue, PrintItem, Stmt, Subscript, Type, UnOp,
+    ArrayName, BinOp, DataItem, Expr, InputItem, LValue, PrintItem, Stmt, SubArg, Subscript, Type,
+    UnOp,
 };
 use crate::lexer::{self, Keyword, Token, TokenKind};
 
@@ -351,33 +352,39 @@ impl<'a> Parser<'a> {
         Ok(args)
     }
 
-    /// A string subscript after `(`: `i`, `i, j, ...` or a `TO` range.
+    /// A string subscript after `(`, consuming the `)`: indices separated
+    /// by commas, the last of which may be a `TO` range.
     fn subscript(&mut self) -> PResult<Subscript> {
-        if self.eat_keyword(Keyword::To) {
-            let end = self.range_end()?;
-            return Ok(Subscript::Range(None, end));
+        let mut args = Vec::new();
+        loop {
+            let start = if self.peek() == Some(&TokenKind::Keyword(Keyword::To)) {
+                None
+            } else {
+                Some(self.typed_expr(Type::Num)?)
+            };
+            let arg = if self.eat_keyword(Keyword::To) {
+                let end = if matches!(self.peek(), Some(TokenKind::RParen | TokenKind::Comma)) {
+                    None
+                } else {
+                    Some(Box::new(self.typed_expr(Type::Num)?))
+                };
+                SubArg::Range(start.map(Box::new), end)
+            } else {
+                match start {
+                    Some(index) => SubArg::Index(index),
+                    None => return self.error(),
+                }
+            };
+            let is_range = matches!(arg, SubArg::Range(..));
+            args.push(arg);
+            if self.eat(&TokenKind::RParen) {
+                return Ok(args);
+            }
+            // Only the last argument may be a range.
+            if is_range || !self.eat(&TokenKind::Comma) {
+                return self.error();
+            }
         }
-        let first = self.typed_expr(Type::Num)?;
-        if self.eat_keyword(Keyword::To) {
-            let end = self.range_end()?;
-            return Ok(Subscript::Range(Some(Box::new(first)), end));
-        }
-        let mut args = vec![first];
-        while self.eat(&TokenKind::Comma) {
-            args.push(self.typed_expr(Type::Num)?);
-        }
-        self.expect(&TokenKind::RParen)?;
-        Ok(Subscript::Index(args))
-    }
-
-    /// Optional end of a `TO` range, consuming the `)`.
-    fn range_end(&mut self) -> PResult<Option<Box<Expr>>> {
-        if self.eat(&TokenKind::RParen) {
-            return Ok(None);
-        }
-        let end = self.typed_expr(Type::Num)?;
-        self.expect(&TokenKind::RParen)?;
-        Ok(Some(Box::new(end)))
     }
 
     // ----- expressions (lowest to highest precedence) -----
@@ -565,11 +572,11 @@ impl<'a> Parser<'a> {
     fn string_postfix(&mut self, mut expr: Expr) -> PResult<(Expr, Type)> {
         while self.peek() == Some(&TokenKind::LParen) {
             self.pos += 1;
-            let sub = self.subscript()?;
-            if matches!(&sub, Subscript::Index(args) if args.len() != 1) {
+            let mut sub = self.subscript()?;
+            if sub.len() != 1 {
                 return self.error();
             }
-            expr = Expr::Slice(Box::new(expr), sub);
+            expr = Expr::Slice(Box::new(expr), Box::new(sub.remove(0)));
         }
         Ok((expr, Type::Str))
     }
@@ -684,6 +691,14 @@ mod tests {
             panic!()
         };
         assert!(matches!(expr, Expr::Unary(UnOp::Neg, _)));
+    }
+
+    #[test]
+    fn character_matrix_subscripts() {
+        ok("PRINT m$(1, 2 TO 3); m$(2, TO 2); m$(1, 3 TO); m$(1, 2)");
+        assert_eq!(err("PRINT m$(1 TO 2, 3)"), 1);
+        assert_eq!(err("PRINT \"ab\"(1, 2)"), 1);
+        assert_eq!(err("PRINT m$(1,)"), 1);
     }
 
     #[test]

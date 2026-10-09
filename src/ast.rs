@@ -31,15 +31,18 @@ pub enum BinOp {
     Or,
 }
 
-/// `( ... )` after a string: an index list or a `TO` range.
+/// One argument inside `( ... )` after a string.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Subscript {
-    /// `(i)` or `(i, j, ...)`: array element, or a single character when
-    /// there is no string array of that name.
-    Index(Vec<Expr>),
-    /// `(s TO e)`, `(s TO)`, `(TO e)`.
+pub enum SubArg {
+    /// `i`: an array index, or a single character.
+    Index(Expr),
+    /// `s TO e`, `s TO`, `TO e`: a character range.
     Range(Option<Box<Expr>>, Option<Box<Expr>>),
 }
+
+/// `( ... )` after a string: comma-separated arguments, of which only the
+/// last may be a `TO` range, e.g. `a$(2)`, `a$(2 TO 4)`, `m$(3, 2 TO 4)`.
+pub type Subscript = Vec<SubArg>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
@@ -50,7 +53,7 @@ pub enum Expr {
     /// String variable (`A$`), optionally subscripted.
     StrVar(String, Option<Subscript>),
     /// Slice of an arbitrary string expression, e.g. `"hello"(2 TO 3)`.
-    Slice(Box<Expr>, Subscript),
+    Slice(Box<Expr>, Box<SubArg>),
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
     /// Built-in function; `None` for argument-less functions (`RND`, `INKEY$`).

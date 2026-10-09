@@ -7,9 +7,7 @@ use std::ops::Bound;
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::ast::{
-    BinOp, DataItem, Expr, InputItem, LValue, PrintItem, Stmt, Subscript, Type, UnOp,
-};
+use crate::ast::{BinOp, DataItem, Expr, InputItem, LValue, PrintItem, Stmt, SubArg, Type, UnOp};
 use crate::error::{BasicError, ErrorCode};
 use crate::format::format_number;
 use crate::input::{Input, LineSource};
@@ -162,13 +160,17 @@ struct Array<T> {
     data: Vec<T>,
 }
 
+/// Number of elements for the given dimensions, within the array size limit.
+fn element_count(dims: &[usize]) -> Result<usize> {
+    dims.iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .filter(|&n| n <= MAX_ARRAY_ELEMENTS)
+        .ok_or_else(|| ErrorCode::OutOfMemory.into())
+}
+
 impl<T: Clone> Array<T> {
     fn new(dims: Vec<usize>, fill: T) -> Result<Self> {
-        let size = dims
-            .iter()
-            .try_fold(1usize, |acc, &d| acc.checked_mul(d))
-            .filter(|&n| n <= MAX_ARRAY_ELEMENTS)
-            .ok_or(ErrorCode::OutOfMemory)?;
+        let size = element_count(&dims)?;
         Ok(Array {
             dims,
             data: vec![fill; size],
@@ -191,12 +193,19 @@ impl<T: Clone> Array<T> {
     }
 }
 
+/// A Sinclair character matrix: `DIM a$(d1, ..., dn)` holds strings of
+/// exactly `dn` characters, indexed by the first `n - 1` dimensions.
+struct StrArray {
+    rows: Array<String>,
+    width: usize,
+}
+
 #[derive(Default)]
 struct Variables {
     nums: HashMap<String, f64>,
     strs: HashMap<String, String>,
     num_arrays: HashMap<String, Array<f64>>,
-    str_arrays: HashMap<String, Array<String>>,
+    str_arrays: HashMap<String, StrArray>,
 }
 
 /// Parsed program plus its `DATA` pool, rebuilt whenever the program changes.
@@ -617,8 +626,12 @@ impl Interpreter {
                         self.vars.num_arrays.insert(array.name.clone(), arr);
                     }
                     Type::Str => {
-                        let arr = Array::new(sizes, String::new())?;
-                        self.vars.str_arrays.insert(array.name.clone(), arr);
+                        element_count(&sizes)?;
+                        let width = sizes.pop().unwrap_or(1);
+                        let rows = Array::new(sizes, " ".repeat(width))?;
+                        self.vars
+                            .str_arrays
+                            .insert(array.name.clone(), StrArray { rows, width });
                     }
                 }
             }
@@ -916,26 +929,22 @@ impl Interpreter {
                 let offset = array.offset(&index)?;
                 array.data[offset] = value;
             }
+            LValue::Str(name, None) if self.is_single_row(name) => {
+                self.assign_str_array(name, &[], &value.string()?)?;
+            }
             LValue::Str(name, None) => {
                 let value = check_len(value.string()?)?;
                 self.vars.strs.insert(name.clone(), value);
             }
-            LValue::Str(name, Some(Subscript::Index(subs)))
-                if self.vars.str_arrays.contains_key(name) =>
-            {
-                let value = check_len(value.string()?)?;
-                let index = self.eval_indices(subs)?;
-                let array = self
-                    .vars
-                    .str_arrays
-                    .get_mut(name)
-                    .ok_or(ErrorCode::VariableNotFound)?;
-                let offset = array.offset(&index)?;
-                array.data[offset] = value;
+            LValue::Str(name, Some(sub)) if self.vars.str_arrays.contains_key(name) => {
+                self.assign_str_array(name, sub, &value.string()?)?;
             }
             LValue::Str(name, Some(sub)) => {
                 // Assignment to a substring replaces it in place, padding or
                 // truncating the new text to the slice length.
+                let [arg] = sub.as_slice() else {
+                    return Err(ErrorCode::VariableNotFound.into());
+                };
                 let value = value.string()?;
                 let current = self
                     .vars
@@ -943,16 +952,9 @@ impl Interpreter {
                     .get(name)
                     .ok_or(ErrorCode::VariableNotFound)?
                     .clone();
-                let mut chars: Vec<char> = current.chars().collect();
-                if let Some((from, to)) = self.slice_bounds(sub, chars.len())? {
-                    let mut replacement = value.chars().chain(std::iter::repeat(' '));
-                    for c in &mut chars[from..to] {
-                        *c = replacement.next().unwrap_or(' ');
-                    }
-                }
-                self.vars
-                    .strs
-                    .insert(name.clone(), chars.into_iter().collect());
+                let bounds = self.slice_bounds(arg, current.chars().count())?;
+                let updated = overwrite(&current, bounds, &value);
+                self.vars.strs.insert(name.clone(), updated);
             }
         }
         Ok(())
@@ -1018,16 +1020,13 @@ impl Interpreter {
     }
 
     /// 0-based half-open character range for a slice, or `None` when empty.
-    fn slice_bounds(&mut self, sub: &Subscript, len: usize) -> Result<Option<(usize, usize)>> {
-        let (from, to) = match sub {
-            Subscript::Index(args) => {
-                let [arg] = args.as_slice() else {
-                    return Err(ErrorCode::SubscriptOutOfRange.into());
-                };
-                let i = self.eval_int(arg)?;
+    fn slice_bounds(&mut self, arg: &SubArg, len: usize) -> Result<Option<(usize, usize)>> {
+        let (from, to) = match arg {
+            SubArg::Index(index) => {
+                let i = self.eval_int(index)?;
                 (i, i)
             }
-            Subscript::Range(from, to) => {
+            SubArg::Range(from, to) => {
                 let from = match from {
                     Some(e) => self.eval_int(e)?,
                     None => 1,
@@ -1048,12 +1047,92 @@ impl Interpreter {
         Ok(Some((from as usize - 1, to as usize)))
     }
 
-    fn slice(&mut self, s: &str, sub: &Subscript) -> Result<String> {
+    fn slice(&mut self, s: &str, arg: &SubArg) -> Result<String> {
         let chars: Vec<char> = s.chars().collect();
-        Ok(match self.slice_bounds(sub, chars.len())? {
+        Ok(match self.slice_bounds(arg, chars.len())? {
             Some((from, to)) => chars[from..to].iter().collect(),
             None => String::new(),
         })
+    }
+
+    /// True for a one-dimensional string array (`DIM a$(10)`), which is a
+    /// single fixed-length string that `a$` without subscripts refers to.
+    fn is_single_row(&self, name: &str) -> bool {
+        self.vars
+            .str_arrays
+            .get(name)
+            .is_some_and(|a| a.rows.dims.is_empty())
+    }
+
+    /// Resolves character-matrix subscripts: all but the last dimension
+    /// select a row, and an optional final index or range slices that row.
+    /// Returns the row offset, the row width and the slice, if any.
+    fn str_array_target<'s>(
+        &mut self,
+        name: &str,
+        sub: &'s [SubArg],
+    ) -> Result<(usize, usize, Option<&'s SubArg>)> {
+        let row_dims = self
+            .vars
+            .str_arrays
+            .get(name)
+            .ok_or(ErrorCode::VariableNotFound)?
+            .rows
+            .dims
+            .len();
+        let (indices, slice) = match sub.split_last() {
+            Some((last @ SubArg::Range(..), rest)) => (rest, Some(last)),
+            Some((last, rest)) if sub.len() == row_dims + 1 => (rest, Some(last)),
+            _ => (sub, None),
+        };
+        let mut index = Vec::with_capacity(indices.len());
+        for arg in indices {
+            match arg {
+                SubArg::Index(expr) => index.push(self.eval_int(expr)?),
+                SubArg::Range(..) => return Err(ErrorCode::SubscriptOutOfRange.into()),
+            }
+        }
+        let array = self
+            .vars
+            .str_arrays
+            .get(name)
+            .ok_or(ErrorCode::VariableNotFound)?;
+        Ok((array.rows.offset(&index)?, array.width, slice))
+    }
+
+    fn eval_str_array(&mut self, name: &str, sub: &[SubArg]) -> Result<String> {
+        let (offset, _, slice) = self.str_array_target(name, sub)?;
+        let row = self
+            .vars
+            .str_arrays
+            .get(name)
+            .ok_or(ErrorCode::VariableNotFound)?
+            .rows
+            .data[offset]
+            .clone();
+        match slice {
+            Some(arg) => self.slice(&row, arg),
+            None => Ok(row),
+        }
+    }
+
+    /// Writes into a character-matrix row, padding or truncating `value` to
+    /// the row (or slice) length.
+    fn assign_str_array(&mut self, name: &str, sub: &[SubArg], value: &str) -> Result<()> {
+        let (offset, width, slice) = self.str_array_target(name, sub)?;
+        let bounds = match slice {
+            Some(arg) => self.slice_bounds(arg, width)?,
+            None => Some((0, width)),
+        };
+        let row = &mut self
+            .vars
+            .str_arrays
+            .get_mut(name)
+            .ok_or(ErrorCode::VariableNotFound)?
+            .rows
+            .data[offset];
+        *row = overwrite(row, bounds, value);
+        Ok(())
     }
 
     fn eval(&mut self, expr: &Expr) -> Result<Value> {
@@ -1076,6 +1155,9 @@ impl Interpreter {
                     .ok_or(ErrorCode::VariableNotFound)?;
                 Value::Number(array.data[array.offset(&index)?])
             }
+            Expr::StrVar(name, None) if self.is_single_row(name) => {
+                Value::Str(self.eval_str_array(name, &[])?)
+            }
             Expr::StrVar(name, None) => Value::Str(
                 self.vars
                     .strs
@@ -1083,25 +1165,20 @@ impl Interpreter {
                     .ok_or(ErrorCode::VariableNotFound)?
                     .clone(),
             ),
-            Expr::StrVar(name, Some(Subscript::Index(subs)))
-                if self.vars.str_arrays.contains_key(name) =>
-            {
-                let index = self.eval_indices(subs)?;
-                let array = self
-                    .vars
-                    .str_arrays
-                    .get(name)
-                    .ok_or(ErrorCode::VariableNotFound)?;
-                Value::Str(array.data[array.offset(&index)?].clone())
+            Expr::StrVar(name, Some(sub)) if self.vars.str_arrays.contains_key(name) => {
+                Value::Str(self.eval_str_array(name, sub)?)
             }
             Expr::StrVar(name, Some(sub)) => {
+                let [arg] = sub.as_slice() else {
+                    return Err(ErrorCode::VariableNotFound.into());
+                };
                 let s = self
                     .vars
                     .strs
                     .get(name)
                     .ok_or(ErrorCode::VariableNotFound)?
                     .clone();
-                Value::Str(self.slice(&s, sub)?)
+                Value::Str(self.slice(&s, arg)?)
             }
             Expr::Slice(inner, sub) => {
                 let s = self.eval_str(inner)?;
@@ -1253,6 +1330,19 @@ fn find_next(var: &str, pos: Pos, stmts: &[Stmt], prog: &Compiled) -> Option<Pos
                 stmt: i + 1,
             })
         })
+}
+
+/// Replaces the characters in `bounds` with `value`, padded with spaces or
+/// truncated to fit (Sinclair "Procrustean" assignment).
+fn overwrite(current: &str, bounds: Option<(usize, usize)>, value: &str) -> String {
+    let mut chars: Vec<char> = current.chars().collect();
+    if let Some((from, to)) = bounds {
+        let mut replacement = value.chars().chain(std::iter::repeat(' '));
+        for c in &mut chars[from..to] {
+            *c = replacement.next().unwrap_or(' ');
+        }
+    }
+    chars.into_iter().collect()
 }
 
 fn truth(b: bool) -> f64 {

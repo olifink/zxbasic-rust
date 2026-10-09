@@ -39,7 +39,11 @@ Standardized language specification for the **zxbasic** dialect of Sinclair BASI
 * **Numeric Variables:** Begin with an alphabetic character (`A`-`Z`, `a`-`z`), optionally followed by alphanumeric characters.
 * **String Variables:** Begin with an alphabetic character, optionally followed by alphanumeric characters, and end immediately with a dollar sign (`A$`, `b$`, `NAME$`, `line2$`). Like numeric variables, string variable names are case-sensitive (`name$` and `NAME$` are distinct).
 * **Numeric Arrays:** An identifier followed by dimension parentheses (e.g., `A(10)`, `matrix(3, 3)`).
-* **String Arrays:** An identifier ending in `$` followed by dimensions (e.g., `A$(10, 32)`). Unlike the Spectrum's fixed-width character matrices, every element is an independent dynamic-length string (initially `""`), and all dimensions are element indices. When a string array exists, `A$(i)` refers to its element; otherwise `A$(i)` is the single character `A$(i TO i)` of the string variable `A$`.
+* **String Arrays / Character Matrices:** An identifier ending in `$` followed by dimensions (e.g., `A$(10, 32)`), with Sinclair semantics. The **last dimension is the fixed string length**, so `DIM A$(10, 32)` holds 10 strings of exactly 32 characters, initially all spaces.
+  * `A$(i)` is the whole 32-character row `i`. `A$(i, j)` is its `j`-th character, and `A$(i, s TO e)` is a slice of it. Only the final subscript may be a `TO` range.
+  * Assigning to a row, character or slice pads the new text with spaces or truncates it to fit (`LET A$(1)="ALICE"` stores `"ALICE"` followed by 27 spaces).
+  * A one-dimensional `DIM A$(n)` is a single fixed-length string of `n` characters. Plain `A$` then refers to it, and `A$(i)` is its `i`-th character.
+  * When no string array of that name exists, `A$(i)` and `A$(s TO e)` slice the ordinary string variable `A$`.
 
 ---
 
@@ -92,7 +96,7 @@ Substrings use 1-based indices via the `TO` keyword within parentheses:
   * Assigns evaluated expression to variable. Explicit `LET` is mandatory.
   * Assigning to a substring (`LET A$(2 TO 4)="xy"`, `LET A$(3)="z"`) replaces those characters in place, padding the new text with spaces or truncating it to the slice length (Sinclair "Procrustean" assignment).
 * **`DIM <name>(<dim1> [, <dim2> ...])`**
-  * Allocates a numeric or string array. Arrays use 1-based indexing. Elements start as `0` or `""`. Dimensions are truncated to integers and must be at least `1` (else `B Integer out of range`). Arrays above 10,000,000 elements raise `4 Out of memory`. Re-dimensioning an existing array raises `C Nonsense in BASIC`.
+  * Allocates a numeric or string array. Arrays use 1-based indexing. Numeric elements start as `0`; string array rows start as spaces (see §2.3). Dimensions are truncated to integers and must be at least `1` (else `B Integer out of range`). Arrays above 10,000,000 elements raise `4 Out of memory`. Re-dimensioning an existing array raises `C Nonsense in BASIC`.
 
 ### 4.3 Control Flow
 * **`GOTO <expr>`**

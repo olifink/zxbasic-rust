@@ -380,8 +380,10 @@ fn reading_text_into_number_is_nonsense() {
 
 #[test]
 fn numeric_and_string_arrays() {
-    let script = "DIM m(3,3): LET m(2,3)=5: PRINT m(2,3);m(1,1)\nDIM n$(2): LET n$(2)=\"hi\": PRINT n$(2);n$(1);\"|\"\n";
-    assert_eq!(output(script), "50\nhi|\n");
+    assert_eq!(
+        output("DIM m(3,3): LET m(2,3)=5: PRINT m(2,3);m(1,1)\n"),
+        "50\n"
+    );
     assert_eq!(
         reports("DIM a(2): PRINT a(3)\n"),
         "3 Subscript out of range\n"
@@ -392,6 +394,87 @@ fn numeric_and_string_arrays() {
     );
     assert_eq!(reports("DIM a(2): DIM a(3)\n"), "C Nonsense in BASIC\n");
     assert_eq!(reports("PRINT b(1)\n"), "2 Variable not found\n");
+}
+
+#[test]
+fn string_arrays_are_character_matrices() {
+    // The last dimension is the fixed string length; rows start as spaces.
+    let script = concat!(
+        "DIM c$(2,5)\n",
+        "PRINT \"[\";c$(1);\"]\"\n",
+        "LET c$(1)=\"ABCDEFG\": PRINT \"[\";c$(1);\"]\"\n",
+        "LET c$(2)=\"XY\": PRINT \"[\";c$(2);\"]\"\n",
+        "PRINT c$(1,2);\"|\";c$(1,2 TO 4);\"|\";c$(1,TO 2);\"|\";c$(1)(5)\n",
+        "LET c$(2,4)=\"Z\": LET c$(1,2 TO 3)=\"*\": PRINT c$(2);\"|\";c$(1)\n",
+        "PRINT LEN c$(2)\n",
+    );
+    assert_eq!(
+        output(script),
+        "[     ]\n[ABCDE]\n[XY   ]\nB|BCD|AB|E\nXY Z |A* DE\n5\n"
+    );
+    assert_eq!(
+        reports("DIM c$(2,5): PRINT c$(3)\n"),
+        "3 Subscript out of range\n"
+    );
+    assert_eq!(
+        reports("DIM c$(2,5): PRINT c$(1,6)\n"),
+        "3 Subscript out of range\n"
+    );
+    assert_eq!(
+        reports("DIM c$(2,5): PRINT c$(1 TO 2)\n"),
+        "3 Subscript out of range\n"
+    );
+}
+
+#[test]
+fn one_dimensional_string_array_is_a_fixed_length_string() {
+    assert_eq!(
+        output("DIM s$(5): LET s$=\"Hi\": PRINT \"[\";s$;\"]\";s$(2);LEN s$\n"),
+        "[Hi   ]i5\n"
+    );
+}
+
+#[test]
+fn arrays_example() {
+    let r = run(&format!("{}RUN\n", include_str!("../examples/arrays.bas")));
+    assert_eq!(
+        r.out,
+        concat!(
+            "Matrix element a(2, 3) = 23\n",
+            "Name 1: [ALICE     ]\n",
+            "Name 2: [BOB       ]\n",
+            "Name 3: [CHARLIE   ]\n",
+        )
+    );
+    assert_eq!(r.err, "9 STOP statement, 160:1\n");
+}
+
+#[test]
+fn strings_example() {
+    let r = run(&format!("{}RUN\n", include_str!("../examples/strings.bas")));
+    assert_eq!(
+        r.out,
+        concat!(
+            "Full string: SINCLAIR ZX SPECTRUM\n",
+            "Slice 1 to 8: SINCLAIR\n",
+            "Slice 10 to 11: ZX\n",
+            "Slice 13 to end: SPECTRUM\n",
+            "Single char (5): L\n",
+            "Length: 20\n",
+            "Sinclair AND result: EQUAL\n",
+        )
+    );
+    assert_eq!(r.err, "9 STOP statement, 110:1\n");
+}
+
+#[test]
+fn fibonacci_example() {
+    let r = run(&format!(
+        "{}RUN\n",
+        include_str!("../examples/fibonacci.bas")
+    ));
+    assert_eq!(r.out, "Fibonacci Series:\n0 1 1 2 3 5 8 13 21 34 \n");
+    assert_eq!(r.err, "9 STOP statement, 120:1\n");
 }
 
 // ----- INPUT -----
