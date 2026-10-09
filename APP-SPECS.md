@@ -145,6 +145,23 @@ pub trait LineSource {
 * **`CLS`:** Emits `\033[2J\033[H` only when stdout is a terminal, so piped output stays clean.
 * **Program changes during a run:** `NEW` or `LOAD` executed from a program line ends the run.
 
+### 2.5 Command Line
+
+```text
+zxbasic [FILE]
+zxbasic -h | --help
+```
+
+* **No arguments:** starts the REPL on stdin (interactive or non-interactive, per §2.3).
+* **`FILE`:** loads the program as `LOAD "FILE"` would, then runs it as `RUN` would. When the program ends (normally, at `STOP`, on an error or on BREAK), its report is printed and the REPL continues on stdin. The program and its variables are kept, so it can be inspected, edited or re-run.
+  * A line in the file that fails verification is reported (`C Nonsense in BASIC, <line>:<statement>`) and skipped, exactly as with `LOAD`, and the remaining program still runs.
+  * `EXIT n` in the program terminates the process with status `n` immediately, without entering the REPL.
+  * If the file cannot be read, `zxbasic: <FILE>: <message>` (e.g. `File not found`) is written to stderr and the process exits with status `1` without starting the REPL.
+  * Combined with non-interactive stdin, this gives a scripting mode: `zxbasic prog.bas < /dev/null` runs the program and exits with status `0` at end of input.
+* **`-h`, `--help`:** prints usage to stdout and exits with status `0`.
+* **Usage errors** (unknown option, more than one `FILE`): an error and the usage text are written to stderr; exit status `2`.
+* Paths are taken as raw OS strings (`std::env::args_os`), so non-UTF-8 file names work.
+
 ---
 
 ## 3. Language Dialect Specification
@@ -263,7 +280,7 @@ zxbasic/
 ├── BASIC-SPECS.md
 ├── SPECS-v2.md
 ├── src/
-│   ├── main.rs        # Binary: wires stdin/stdout/stderr and the console into the REPL
+│   ├── main.rs        # Binary: argument parsing; wires stdin/stdout/stderr and the console into the REPL
 │   ├── lib.rs         # Library root: module declarations & public API
 │   ├── repl.rs        # Prompt loop, AUTO numbering, EDIT pre-population
 │   ├── input.rs       # LineSource: rustyline (TTY) / plain stdin (non-TTY)
@@ -276,9 +293,11 @@ zxbasic/
 │   ├── format.rs      # Spectrum-style number formatting
 │   ├── renum.rs       # RENUM line mapping and branch-target patching
 │   └── error.rs       # BasicError / ErrorCode and report formatting
+├── examples/          # Sample programs (also run by the test suite)
 └── tests/
     ├── store.rs       # Integration tests for line management
-    └── interpreter.rs # End-to-end scripts run through the REPL (piped mode)
+    ├── interpreter.rs # End-to-end scripts run through the REPL (piped mode)
+    └── cli.rs         # Runs the zxbasic binary: FILE argument, exit statuses, usage
 ```
 
 * Unit tests live alongside the code in `#[cfg(test)] mod tests { ... }` blocks; `tests/` holds integration tests that drive the library's public API.

@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Write;
 use std::ops::Bound;
+use std::path::Path;
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -673,7 +674,7 @@ impl Interpreter {
             }
             Stmt::Load(path) => {
                 let path = self.eval_str(path)?;
-                self.load(&path)?;
+                self.load(Path::new(&path))?;
             }
             Stmt::Exit(code) => {
                 let code = match code {
@@ -884,8 +885,10 @@ impl Interpreter {
         fs::write(path, text).map_err(|e| BasicError::from_io(&e))
     }
 
-    fn load(&mut self, path: &str) -> Result<()> {
-        if path.is_empty() {
+    /// Replaces the program with the one in `path` (`LOAD`). Lines that fail
+    /// verification are reported and skipped.
+    pub fn load(&mut self, path: &Path) -> Result<()> {
+        if path.as_os_str().is_empty() {
             return Err(ErrorCode::FileError.into());
         }
         // Read the whole file first so a missing file leaves the program intact.

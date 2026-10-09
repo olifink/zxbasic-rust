@@ -2,6 +2,7 @@
 //! pre-population, and passes everything else to the interpreter.
 
 use std::io::ErrorKind;
+use std::path::Path;
 
 use crate::error::{BasicError, ErrorCode};
 use crate::input::{Input, LineSource};
@@ -30,6 +31,14 @@ impl Repl {
             auto: None,
             initial: String::new(),
         }
+    }
+
+    /// Loads and runs a program file, as `LOAD` followed by `RUN`, leaving
+    /// the program and its variables in place for the REPL that follows.
+    /// Returns an exit status if the program executed `EXIT`.
+    pub fn load_and_run(&mut self, path: &Path) -> Result<Option<i32>, BasicError> {
+        self.interpreter.load(path)?;
+        Ok(self.handle("RUN"))
     }
 
     /// Runs until end of input or `EXIT`; returns the process exit status.
