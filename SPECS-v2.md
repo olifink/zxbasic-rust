@@ -13,7 +13,7 @@ When a user enters a line starting with a line number (`<number> <text>`), the l
 * **Preservation Constraints:**
   * String literals (`"..."`) retain their exact casing.
   * `REM` contents (from `REM` up to the end of the line) retain exact casing.
-  * Variable identifiers retain case sensitivity (`val` remains `val`, `A$` remains `A$`), but reserved keywords (`print`, `for`, `to`, `step`, `goto`, `gosub`, `inkey$`, etc.) become canonical uppercase (`PRINT`, `FOR`, `TO`, `STEP`, `GOTO`, `GOSUB`, `INKEY$`).
+  * Variable identifiers retain case sensitivity (`total` remains `total`, `A$` remains `A$`), but reserved keywords (`print`, `for`, `to`, `step`, `goto`, `gosub`, `inkey$`, etc.) become canonical uppercase (`PRINT`, `FOR`, `TO`, `STEP`, `GOTO`, `GOSUB`, `INKEY$`).
 * **Example:**
   * Input: `10 for i=1 to 10: print "count: "; i: next i`
   * Stored: `10 FOR i=1 TO 10: PRINT "count: "; i: NEXT i`

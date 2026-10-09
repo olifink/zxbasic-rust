@@ -10,6 +10,9 @@ license = "MIT"
 # REPL line editing / in-memory history (only non-std dependency).
 # Default features are disabled to drop `with-file-history` (no history file support compiled in).
 rustyline = { version = "18.0.1", default-features = false }
+# Safe termios/poll wrappers for BREAK (Ctrl+C) and INKEY$ while a program runs.
+# Already a dependency of rustyline, so this adds no new crate to the build.
+nix = { version = "0.31", default-features = false, features = ["poll", "term"] }
 
 [profile.release]
 opt-level = 3

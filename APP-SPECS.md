@@ -11,7 +11,11 @@ Specification and bootstrapping contract for building a lightweight ZX Spectrum 
 * **Language:** Rust, edition 2024 (minimum supported Rust version: 1.85, matching the Debian Trixie `rustc` package). Stable toolchain only.
 * **Code Quality:** `#![forbid(unsafe_code)]` at the crate root. Code must be clean under `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check`.
 * **Design principle:** Clean UNIX/POSIX terminal utility. No Sinclair hardware emulation (no ULA emulation, no display RAM attributes, no token-keyboard mapping).
-* **Dependencies:** Rust standard library only, except for REPL line-editing: [`rustyline`](https://crates.io/crates/rustyline). A custom raw-mode editor is out of scope because termios access would need `unsafe` code or another crate. No heavy GUI/audio dependencies. Every added crate must be justified in `Cargo.toml` comments.
+* **Dependencies:** Rust standard library only, except for:
+  * [`rustyline`](https://crates.io/crates/rustyline) for REPL line-editing. A custom raw-mode editor is out of scope because termios access would need `unsafe` code or another crate.
+  * [`nix`](https://crates.io/crates/nix) (features `term` and `poll` only) for safe termios/poll wrappers used by BREAK and `INKEY$` (§2.4). It is already a dependency of `rustyline`, so it adds no new crate to the build.
+
+  No heavy GUI/audio dependencies. Every added crate must be justified in `Cargo.toml` comments.
 
 ---
 
@@ -104,9 +108,17 @@ pub enum Value {
 At startup the REPL checks `std::io::stdin().is_terminal()` (`std::io::IsTerminal`, no extra crate) and selects one of two input sources behind a common interface:
 
 ```rust
+pub enum Input {
+    Line(String),
+    Interrupted, // Ctrl+C
+    Eof,         // Ctrl+D or end of piped input
+}
+
 pub trait LineSource {
-    /// Returns `Ok(None)` at end of input.
-    fn read_line(&mut self, prompt: &str, initial: &str) -> std::io::Result<Option<String>>;
+    /// Reads one line; `initial` pre-populates the editor (used by `EDIT`).
+    fn read_line(&mut self, prompt: &str, initial: &str) -> std::io::Result<Input>;
+    /// Whether prompts are shown and `EDIT` is available.
+    fn is_interactive(&self) -> bool;
 }
 ```
 
@@ -121,8 +133,17 @@ pub trait LineSource {
   * Trailing `\n` / `\r\n` is stripped. Invalid UTF-8 is reported as `C Nonsense in BASIC` for that line and processing continues.
   * Reports are written to stderr, and processing continues with the next input line.
   * End of input exits with status `0`. Scripts that need a different status use `EXIT n` (SPECS-v2.md §2.3).
-  * `INPUT` statements read the next line from the same stdin stream.
+  * `INPUT` statements read the next line from the same stdin stream. The `INPUT` prompt is program output and is written to stdout. A numeric reply that cannot be evaluated reports `C Nonsense in BASIC`, and end of input during `INPUT` reports `H STOP in INPUT`.
   * `EDIT` is unavailable and reports `C Nonsense in BASIC`. `AUTO` still works: lines are numbered automatically and a blank line ends `AUTO` mode.
+
+### 2.4 Running Programs
+
+* **Reports:** Reports are written to stderr, on a fresh line (a newline is first written to stdout if the cursor is not at column 0). In interactive mode, a program that runs to completion reports `0 OK, <line>:<statement>`; in non-interactive mode success is silent.
+* **BREAK (interactive mode only):** While statements execute, the terminal is switched to non-canonical, no-echo, no-signal mode (`nix::sys::termios`), so Ctrl+C arrives as a byte rather than killing the process. Pending input is polled every 256 statements (`nix::poll`) and Ctrl+C stops the program with `L BREAK into program, <line>:<statement>`. The original terminal settings are restored when execution ends, before each `INPUT`, and when the `Console` is dropped.
+* **`INKEY$`:** Returns the next key pressed while the program runs, or `""` if none is pending. In non-interactive mode it always returns `""`.
+* **`INPUT` (interactive):** Reads through `rustyline` with the `INPUT` prompt. Ctrl+C reports `L BREAK into program`, and a numeric reply that cannot be evaluated re-prompts.
+* **`CLS`:** Emits `\033[2J\033[H` only when stdout is a terminal, so piped output stays clean.
+* **Program changes during a run:** `NEW` or `LOAD` executed from a program line ends the run.
 
 ---
 
@@ -137,7 +158,9 @@ pub trait LineSource {
 ### 3.2 Types & Expressions
 
 * **Numbers:** Standard IEEE 754 64-bit float (`f64`).
-* **Strings:** Identifiers ending with `$` (e.g., `A$`, `NAME$`); multi-letter names are allowed (see BASIC-SPECS.md §2.3). Stored as `String`; program text is restricted to the 7-bit ASCII subset, so 1-based slicing maps directly to byte ranges. Slicing must use checked access (`str::get`) and raise `3 Subscript out of range` rather than panicking.
+* **Strings:** Identifiers ending with `$` (e.g., `A$`, `NAME$`); multi-letter names are allowed (see BASIC-SPECS.md §2.3). Stored as `String`. `LEN`, `CODE` and 1-based slicing operate on characters (not bytes), so UTF-8 text in string literals slices safely. Out-of-range slices raise `3 Subscript out of range` rather than panicking.
+* **Type checking:** Expression types are checked statically when a line is parsed, so `LET a="x"` is rejected on entry with `C Nonsense in BASIC`.
+* **Number output (`PRINT`, `STR$`):** Spectrum style. Integers below 10^13 print in full. Other values are rounded to 8 significant digits, with no leading zero before the decimal point (`.5`, `-.25`). `E` notation (`1E+20`, `1.5E-7`) is used outside the 10^-5 to 10^13 range.
 * **Operators:**
   * Arithmetic: `+`, `-`, `*`, `/`, `^` (exponentiation, `f64::powf`).
   * Relational: `=`, `<>`, `<`, `>`, `<=`, `>=`.
@@ -177,9 +200,9 @@ pub trait LineSource {
 ```
 
 
-* `SAVE "<path>"`: Serializes the current `Program` sequentially into the designated file path (`std::fs::File` + `BufWriter`, one `writeln!` per line).
-* `LOAD "<path>"`: Invokes `NEW` (clears variables and existing program store), reads lines sequentially from the file (`BufReader::lines`), and runs them through the line-store insertion logic.
-* `std::io::Error` values are mapped to a `BasicError` report; I/O failures must not terminate the REPL.
+* `SAVE "<path>"`: Serializes the current `Program` as `<line> <text>` lines into the designated file path (`std::fs::write`).
+* `LOAD "<path>"`: Reads the whole file first, so a missing or unreadable file leaves the current program untouched. It then invokes `NEW` (clearing variables and the existing program store) and runs each line through the line-store insertion logic. Blank lines are skipped. A line that is unnumbered or fails syntax verification is reported (`C Nonsense in BASIC`), and loading continues with the next line.
+* `std::io::Error` values are mapped to `F File not found` (`ErrorKind::NotFound`) or `F File error` (anything else); I/O failures must not terminate the REPL.
 
 ---
 
@@ -198,13 +221,22 @@ Errors are modelled as a single enum implementing `std::fmt::Display` and `std::
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
     Ok,                  // 0 OK
+    NextWithoutFor,      // 1 NEXT without FOR
     VariableNotFound,    // 2 Variable not found
     SubscriptOutOfRange, // 3 Subscript out of range
+    OutOfMemory,         // 4 Out of memory
+    NumberTooBig,        // 6 Number too big
     ReturnWithoutGosub,  // 7 Return without GOSUB
     EndOfData,           // 8 End of DATA
     Stop,                // 9 STOP statement
+    InvalidArgument,     // A Invalid argument
     IntegerOutOfRange,   // B Integer out of range
     Nonsense,            // C Nonsense in BASIC
+    FileNotFound,        // F File not found
+    FileError,           // F File error
+    StopInInput,         // H STOP in INPUT
+    Break,               // L BREAK into program
+    StatementLost,       // N Statement lost
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,15 +247,7 @@ pub struct BasicError {
 }
 ```
 
-Primary codes to implement:
-
-* `0 OK`
-* `2 Variable not found`
-* `3 Subscript out of range`
-* `7 Return without GOSUB`
-* `8 End of DATA`
-* `9 STOP statement`
-* `C Nonsense in BASIC` (General syntax error)
+The full list of codes, with their trigger conditions, is in BASIC-SPECS.md §6.
 
 ---
 
@@ -239,15 +263,22 @@ zxbasic/
 ├── BASIC-SPECS.md
 ├── SPECS-v2.md
 ├── src/
-│   ├── main.rs       # Binary: REPL entry point and input dispatcher
-│   ├── lib.rs        # Library root: module declarations & public API
-│   ├── program.rs    # Line store (insert, delete, list, iterate)
-│   ├── input.rs      # LineSource: rustyline (TTY) / plain stdin (non-TTY)
-│   ├── lexer.rs      # Tokenizer and keyword recognizer
-│   ├── parser.rs     # Expression parser & statement execution
-│   └── error.rs      # BasicError / ErrorCode and report formatting
+│   ├── main.rs        # Binary: wires stdin/stdout/stderr and the console into the REPL
+│   ├── lib.rs         # Library root: module declarations & public API
+│   ├── repl.rs        # Prompt loop, AUTO numbering, EDIT pre-population
+│   ├── input.rs       # LineSource: rustyline (TTY) / plain stdin (non-TTY)
+│   ├── terminal.rs    # Console: run-mode terminal settings, BREAK, INKEY$
+│   ├── program.rs     # Line store (insert, delete, list, iterate)
+│   ├── lexer.rs       # Tokenizer, keyword recognizer, keyword canonicalization
+│   ├── ast.rs         # Statement and expression syntax tree
+│   ├── parser.rs      # Statement/expression parser with static type checking
+│   ├── interpreter.rs # Execution engine, variables, stacks, DATA pool, I/O
+│   ├── format.rs      # Spectrum-style number formatting
+│   ├── renum.rs       # RENUM line mapping and branch-target patching
+│   └── error.rs       # BasicError / ErrorCode and report formatting
 └── tests/
-    └── store.rs      # Integration tests for line management
+    ├── store.rs       # Integration tests for line management
+    └── interpreter.rs # End-to-end scripts run through the REPL (piped mode)
 ```
 
 * Unit tests live alongside the code in `#[cfg(test)] mod tests { ... }` blocks; `tests/` holds integration tests that drive the library's public API.
@@ -262,9 +293,12 @@ edition = "2024"
 rust-version = "1.85"
 
 [dependencies]
-# REPL line editing / in-memory history (only non-std dependency).
+# REPL line editing / in-memory history.
 # Default features are disabled to drop `with-file-history` (no history file support compiled in).
 rustyline = { version = "18.0.1", default-features = false }
+# Safe termios/poll wrappers for BREAK (Ctrl+C) and INKEY$ while a program runs.
+# Already a dependency of rustyline, so this adds no new crate to the build.
+nix = { version = "0.31", default-features = false, features = ["poll", "term"] }
 
 [profile.release]
 opt-level = 3

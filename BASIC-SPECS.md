@@ -39,7 +39,7 @@ Standardized language specification for the **zxbasic** dialect of Sinclair BASI
 * **Numeric Variables:** Begin with an alphabetic character (`A`-`Z`, `a`-`z`), optionally followed by alphanumeric characters.
 * **String Variables:** Begin with an alphabetic character, optionally followed by alphanumeric characters, and end immediately with a dollar sign (`A$`, `b$`, `NAME$`, `line2$`). Like numeric variables, string variable names are case-sensitive (`name$` and `NAME$` are distinct).
 * **Numeric Arrays:** An identifier followed by dimension parentheses (e.g., `A(10)`, `matrix(3, 3)`).
-* **String Arrays / Character Matrices:** An identifier ending in `$` followed by dimensions (e.g., `A$(10, 32)`).
+* **String Arrays:** An identifier ending in `$` followed by dimensions (e.g., `A$(10, 32)`). Unlike the Spectrum's fixed-width character matrices, every element is an independent dynamic-length string (initially `""`), and all dimensions are element indices. When a string array exists, `A$(i)` refers to its element; otherwise `A$(i)` is the single character `A$(i TO i)` of the string variable `A$`.
 
 ---
 
@@ -90,12 +90,13 @@ Substrings use 1-based indices via the `TO` keyword within parentheses:
 ### 4.2 Assignment & Memory
 * **`LET <var> = <expr>`**
   * Assigns evaluated expression to variable. Explicit `LET` is mandatory.
+  * Assigning to a substring (`LET A$(2 TO 4)="xy"`, `LET A$(3)="z"`) replaces those characters in place, padding the new text with spaces or truncating it to the slice length (Sinclair "Procrustean" assignment).
 * **`DIM <name>(<dim1> [, <dim2> ...])`**
-  * Allocates a numeric or string array. Arrays use 1-based indexing. Re-dimensioning an existing array raises error `4 Out of memory` or `C Nonsense in BASIC`.
+  * Allocates a numeric or string array. Arrays use 1-based indexing. Elements start as `0` or `""`. Dimensions are truncated to integers and must be at least `1` (else `B Integer out of range`). Arrays above 10,000,000 elements raise `4 Out of memory`. Re-dimensioning an existing array raises `C Nonsense in BASIC`.
 
 ### 4.3 Control Flow
 * **`GOTO <expr>`**
-  * Transfers execution to the line number resulting from rounding `<expr>`. If the line does not exist, raise error `B Integer out of range` or report line missing.
+  * Transfers execution to the line number resulting from rounding `<expr>`. A target outside `1`–`9999` raises `B Integer out of range`; a target line that does not exist raises `N Statement lost`. The same rules apply to `GOSUB <expr>` and `RUN <line_number>`.
 * **`GOSUB <expr>`**
   * Pushes the address of the next statement onto the call stack and jumps to `<expr>`.
 * **`RETURN`**
@@ -103,13 +104,15 @@ Substrings use 1-based indices via the `TO` keyword within parentheses:
 * **`IF <expr> THEN <statement>`**
   * Evaluates `<expr>`. If non-zero (true), executes the `<statement>` (and any remaining statements on that line). If zero (false), execution skips the remainder of the physical line.
 * **`FOR <var> = <start> TO <limit> [STEP <step>]`**
-  * Initializes loop variable `<var>` to `<start>`. Evaluates `<limit>` and default `<step>` (`1` if omitted). Pushes loop bounds to the loop stack.
+  * Initializes loop variable `<var>` to `<start>`. Evaluates `<limit>` and default `<step>` (`1` if omitted). Pushes loop bounds to the loop stack, replacing any active loop on the same variable.
+  * If the loop would not run even once (`<start> > <limit>` with a non-negative step, or `<start> < <limit>` with a negative step), execution continues after the matching `NEXT <var>` (searched forward from the `FOR`). If there is no matching `NEXT`, `1 NEXT without FOR` is raised.
 * **`NEXT <var>`**
-  * Increments `<var>` by its recorded `STEP`. If `<step> >= 0` and `<var> <= <limit>`, or `<step> < 0` and `<var> >= <limit>`, execution loops back to the statement following `FOR`. Otherwise, loop state is popped and execution continues.
+  * Increments `<var>` by its recorded `STEP`. If `<step> >= 0` and `<var> <= <limit>`, or `<step> < 0` and `<var> >= <limit>`, execution loops back to the statement following `FOR`. Otherwise, loop state is popped and execution continues. A `NEXT` with no active loop on `<var>` raises `1 NEXT without FOR`.
 
 ### 4.4 Data Blocks
 * **`DATA <val1> [, <val2> ...]`**
   * Declares static literals (numbers or raw/quoted strings) compiled into a linear data pool. Skipped during normal execution.
+  * Unquoted items are trimmed raw text. Read into a numeric variable, an unquoted item is evaluated as a numeric expression. Reading a quoted item into a numeric variable raises `C Nonsense in BASIC`.
 * **`READ <var1> [, <var2> ...]`**
   * Reads the next sequential value from the `DATA` pool into the given variable. Raises `8 End of DATA` if read past available items.
 * **`RESTORE [line_number]`**
@@ -124,8 +127,9 @@ Substrings use 1-based indices via the `TO` keyword within parentheses:
     * `,` (Comma): Advances cursor to the next 16-character column tabstop.
     * `'` (Apostrophe): Forces a newline (`\n`).
   * If a `PRINT` statement does not end with `;` or `,`, a newline is appended automatically.
-* **`INPUT [ <prompt_str> ; ] <var>`**
-  * Reads a line of user input from the terminal and assigns it to `<var>`, optionally printing `<prompt_str>` first.
+* **`INPUT [ <prompt_str> ; ] <var> [ <separator> ... ]`**
+  * Reads a line of user input from the terminal and assigns it to `<var>`, optionally printing `<prompt_str>` first. Several prompts and variables may be mixed with `;`, `,` and `'` separators (`INPUT "Name? "; n$, "Age? "; age`); each variable reads one line.
+  * A reply for a numeric variable is evaluated as a numeric expression (like `VAL`), so `2*3` and other variables are accepted.
 
 ---
 
@@ -174,11 +178,18 @@ When execution halts or statement parsing fails, implementations must output dia
 | Code | Message | Trigger Condition |
 | --- | --- | --- |
 | `0` | `OK` | Normal termination / successful completion |
+| `1` | `NEXT without FOR` | `NEXT` with no active loop on that variable, or a skipped loop with no matching `NEXT` |
 | `2` | `Variable not found` | Reading an unassigned variable or non-existent array |
 | `3` | `Subscript out of range` | Array index or string slice bounds exceeded |
-| `4` | `Out of memory` | Memory limit reached during allocation |
+| `4` | `Out of memory` | Memory limit reached during allocation (array size, string over 65,535 characters, GOSUB nesting over 10,000) |
+| `6` | `Number too big` | Division by zero or a result too large for a double |
 | `7` | `Return without GOSUB` | Encountering `RETURN` with an empty subroutine stack |
 | `8` | `End of DATA` | Reading past the final available `DATA` element |
 | `9` | `STOP statement` | Execution of a `STOP` instruction |
-| `B` | `Integer out of range` | Target line number or array dimension invalid |
-| `C` | `Nonsense in BASIC` | Syntax error during parsing |
+| `A` | `Invalid argument` | Function argument outside its domain (`SQR` of a negative, `LN` of a non-positive, `ASN`/`ACS` outside `-1..1`) |
+| `B` | `Integer out of range` | Line number outside `1..9999`, invalid array dimension, `CHR$` outside `0..255` |
+| `C` | `Nonsense in BASIC` | Syntax or type error, or an immediate-only command used in a program |
+| `F` | `File not found` / `File error` | `LOAD` of a missing file, or another `SAVE`/`LOAD` failure |
+| `H` | `STOP in INPUT` | End of input while `INPUT` is waiting |
+| `L` | `BREAK into program` | Ctrl+C pressed while a program runs, or at an `INPUT` |
+| `N` | `Statement lost` | Jump to a line that does not exist |

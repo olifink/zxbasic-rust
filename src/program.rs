@@ -65,4 +65,9 @@ impl Program {
     pub fn clear(&mut self) {
         self.lines.clear();
     }
+
+    /// Replaces the whole program at once (`RENUM`).
+    pub fn replace_all(&mut self, lines: BTreeMap<LineNo, String>) {
+        self.lines = lines;
+    }
 }
