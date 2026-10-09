@@ -1,0 +1,16 @@
+[package]
+name = "zxbasic"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A lightweight Sinclair ZX Spectrum BASIC interpreter for POSIX terminals"
+license = "MIT"
+
+[dependencies]
+# REPL line editing / in-memory history (only non-std dependency).
+# Default features are disabled to drop `with-file-history` (no history file support compiled in).
+rustyline = { version = "18.0.1", default-features = false }
+
+[profile.release]
+opt-level = 3
+debug = true
